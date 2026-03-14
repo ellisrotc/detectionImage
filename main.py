@@ -54,36 +54,49 @@ def select_roi(img: np.ndarray, coords: Tuple[int, int, int, int] | None) -> np.
 
 
 def preprocess(roi: np.ndarray) -> np.ndarray:
+    # Convertimos a escala de grises para detectar tanto rojo como negro
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    bin_img = cv2.adaptiveThreshold(
-        blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 19, 10
-    )
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    bin_img = cv2.morphologyEx(bin_img, cv2.MORPH_OPEN, kernel, iterations=1)
+    
+    # El fondo es gris claro (>200 aprox), el texto rojo y negro es mas oscuro (<200)
+    # THRESH_BINARY convierte lo oscuro a 0 (negro) y lo claro a 255 (blanco)
+    # Tesseract prefiere texto negro sobre fondo blanco
+    _, bin_img = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    
     return bin_img
 
 
 def extract_digits(bin_img: np.ndarray) -> List[Tuple[str, Tuple[int, int, int, int]]]:
-    contours, _ = cv2.findContours(bin_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    boxes = []
-    for c in contours:
-        x, y, w, h = cv2.boundingRect(c)
-        if h < 10 or h > 80 or w < 5 or w > 80:
-            continue
-        boxes.append((y, x, w, h))
-    boxes.sort()  # arriba -> abajo
-
+    # Redimensionamos x3 para separar los digitos pegados como el "11"
+    resized = cv2.resize(bin_img, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    
+    # Aplicamos Blur para suavizar los bordes del escalado y binarizamos de nuevo
+    blur = cv2.GaussianBlur(resized, (5, 5), 0)
+    _, final_bin = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)
+    
+    # Añadimos un borde blanco para que Tesseract trabaje mejor
+    padded = cv2.copyMakeBorder(final_bin, 30, 30, 30, 30, cv2.BORDER_CONSTANT, value=255)
+    
+    # Configuracion: psm 6 asume un bloque uniforme de texto (columna de numeros)
+    custom_config = r"--psm 6 -c tessedit_char_whitelist=0123456789"
+    
+    # Obtenemos los datos detallados (incluyendo coordenadas)
+    data = pytesseract.image_to_data(padded, config=custom_config, output_type=pytesseract.Output.DICT)
+    
     results = []
-    for y, x, w, h in boxes:
-        digit_roi = bin_img[y : y + h, x : x + w]
-        digit_roi = cv2.copyMakeBorder(digit_roi, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=0)
-        text = pytesseract.image_to_string(
-            digit_roi, config="--psm 10 -c tessedit_char_whitelist=0123456789"
-        ).strip()
+    for i in range(len(data["text"])):
+        text = data["text"][i].strip()
         if text:
-            results.append((text, (x, y, w, h)))
+            # Revertimos coordenadas por el padding y el escalado x3 para dibujar sobre el roi original
+            x = (data["left"][i] - 30) // 3
+            y = (data["top"][i] - 30) // 3
+            w = data["width"][i] // 3
+            h = data["height"][i] // 3
+            
+            if w > 0 and h > 0:
+                results.append((text, (x, y, w, h)))
+            
     return results
+
 
 
 def main():
